@@ -791,7 +791,7 @@ function AdminPanel({onLogout, customImgs, setCustomImgs, setGameItems=()=>{}}) 
     setUploadTarget(null);
   };
   const resetImg = async (key) => {
-    try { await window.storage.delete(`img:${key}`); } catch {}
+    try { await store.delete(`img:${key}`); } catch {}
     setCustomImgs(p => { const n={...p}; delete n[key]; return n; });
     setCustomized(p => { const n={...p}; delete n[key]; return n; });
     toast(`↩️ ${key} zurückgesetzt`,"rgba(251,191,36,0.9)");
