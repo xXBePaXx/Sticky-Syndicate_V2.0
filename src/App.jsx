@@ -1931,7 +1931,7 @@ function SettingsPanel({settings,onToggle,onClose}){
 }
 
 // ─── GAME WRAPPER (per player) ────────────────────────────────────────────────
-function Game({username,displayName,initialState,hasSeenIntro=false,dialogs,customImgs={},gameItems=null,onLogout}){
+function Game({username,displayName,initialState,dialogs,customImgs={},gameItems=null,onLogout}){
   const gs=initialState;
   const [screen,setScreen]=useState("grow");
   const [cash,setCash]=useState(gs.cash??420);
@@ -2019,11 +2019,7 @@ function Game({username,displayName,initialState,hasSeenIntro=false,dialogs,cust
     await store.set(`mail:${recipient}`,inbox.slice(0,100));
     // Also store in sent (own inbox with flag)
     await addLog(username,"mail",`Nachricht an @${recipient}: ${msg.subject}`);
-    const wasCompose=mailCompose;
-    setMailTo("");setMailSubject("");setMailBody("");
-    if(wasCompose)setMailCompose(false);
-    // Reload mailbox to show sent message
-    setTimeout(loadMailbox,800);
+    setMailTo("");setMailSubject("");setMailBody("");setMailCompose(false);
     toast(`✉️ Gesendet an @${recipient}`,"rgba(74,222,128,0.9)");
   };
   const markRead=async(msgId)=>{
@@ -2045,17 +2041,14 @@ function Game({username,displayName,initialState,hasSeenIntro=false,dialogs,cust
   // Splash → story start (only fires on FIRST EVER login)
   useEffect(()=>{
     if(!gameReady)return;
-    if(!hasSeenIntro && tutStep===0){
-      // Mark on user account so it never fires again
-      store.get(`user:${username}`).then(u=>{
-        if(u&&!u.hasSeenIntro){
-          u.hasSeenIntro=true;
-          store.set(`user:${username}`,u);
-        }
-      });
-      setSeenCh(p=>p.includes("intro")?p:[...p,"intro"]);
-      setTimeout(()=>showChapter(STORY_CHAPTERS[0]),400);
-    }
+    // Double-check via direct storage flag for extra safety
+    store.get(`flag:intro:${username}`).then(seen=>{
+      if(!seen && tutStep===0 && !seenCh.includes("intro")){
+        store.set(`flag:intro:${username}`,true);
+        setSeenCh(p=>[...p,"intro"]);
+        setTimeout(()=>showChapter(STORY_CHAPTERS[0]),400);
+      }
+    });
   },[gameReady]);
 
   // Chapter triggers
@@ -2419,10 +2412,7 @@ export default function App(){
     await addLog(username,"login",`Login von ${username}`);
     u.gameState={...u.gameState,lastSeen:new Date().toISOString()};
     await store.set(`user:${username}`,u);
-    setSession({username,displayName:u.displayName,role:u.role,
-      gameState:u.gameState,
-      hasSeenIntro: u.hasSeenIntro||false,
-    });
+    setSession({username,displayName:u.displayName,role:u.role,gameState:u.gameState});
     setPhase(u.role==="admin"?"admin":"game");
     setLoginLoading(false);
   };
@@ -2452,168 +2442,111 @@ export default function App(){
           )}
           {phase==="login"&&<LoginScreen onLogin={handleLogin} error={loginError} loading={loginLoading}/>}
           {phase==="admin"&&session&&<AdminPanel onLogout={handleLogout} customImgs={customImgs} setCustomImgs={setCustomImgs} setGameItems={setGameItems}/>}
-          {phase==="game"&&session&&<Game username={session.username} displayName={session.displayName} initialState={session.gameState||EMPTY_GAME_STATE()} hasSeenIntro={session.hasSeenIntro||false} dialogs={dialogs} customImgs={customImgs} gameItems={gameItems} onLogout={handleLogout}/>}
+          {phase==="game"&&session&&<Game username={session.username} displayName={session.displayName} initialState={session.gameState||EMPTY_GAME_STATE()} dialogs={dialogs} customImgs={customImgs} gameItems={gameItems} onLogout={handleLogout}/>}
         </div>
       </div>
     </>
   );
 }
 
-// ─── MESSENGER MODAL ─────────────────────────────────────────────────────────
+// ─── MAIL MODAL ───────────────────────────────────────────────────────────────
 function MailModal({mailbox,username,displayName,compose,setCompose,mailTo,setMailTo,mailSubject,setMailSubject,mailBody,setMailBody,onSend,onClose,onRead,onDelete,mailView,setMailView}){
   const unread=mailbox.filter(m=>!m.read).length;
-  const scrollRef=React.useRef(null);
-
-  // Group messages into conversations by partner
-  const conversations=React.useMemo(()=>{
-    const map={};
-    mailbox.forEach(msg=>{
-      const partner=msg.from===username?msg.to:msg.from;
-      if(!map[partner])map[partner]={partner,partnerName:msg.from===username?(msg.toName||msg.to):(msg.fromName||msg.from),messages:[],lastTime:msg.time,unread:0};
-      map[partner].messages.push(msg);
-      if(new Date(msg.time)>new Date(map[partner].lastTime))map[partner].lastTime=msg.time;
-      if(!msg.read&&msg.from!==username)map[partner].unread++;
-    });
-    return Object.values(map).sort((a,b)=>new Date(b.lastTime)-new Date(a.lastTime));
-  },[mailbox]);
-
-  const fmtTime=iso=>{
-    const d=new Date(iso);const now=new Date();
-    const diffH=(now-d)/3600000;
-    if(diffH<1)return`${Math.round(diffH*60)}m`;
-    if(diffH<24)return`${Math.round(diffH)}h`;
-    if(diffH<168)return["So","Mo","Di","Mi","Do","Fr","Sa"][d.getDay()];
-    return d.toLocaleDateString("de-DE",{day:"2-digit",month:"2-digit"});
-  };
-  const fmtFull=iso=>new Date(iso).toLocaleString("de-DE",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"});
-
-  const [activeConv,setActiveConv]=React.useState(null);
-  const conv=activeConv?conversations.find(c=>c.partner===activeConv):null;
-  const convMsgs=conv?[...conv.messages].sort((a,b)=>new Date(a.time)-new Date(b.time)):[];
-
-  React.useEffect(()=>{
-    if(scrollRef.current)scrollRef.current.scrollTop=scrollRef.current.scrollHeight;
-  },[activeConv,convMsgs.length]);
-
+  const fmtT=iso=>{const d=new Date(iso);return d.toLocaleDateString("de-DE",{day:"2-digit",month:"2-digit"})+" "+d.toLocaleTimeString("de-DE",{hour:"2-digit",minute:"2-digit"});};
   return(
     <div style={{position:"absolute",inset:0,zIndex:750,display:"flex",flexDirection:"column"}}>
       <div style={{position:"absolute",inset:0,background:"rgba(0,0,0,0.7)",backdropFilter:"blur(8px)"}} onClick={onClose}/>
-      <div style={{position:"absolute",bottom:0,left:0,right:0,background:"linear-gradient(170deg,#0a1628,#0d1a20)",borderTop:"1.5px solid rgba(255,255,255,0.1)",borderRadius:"28px 28px 0 0",height:"82vh",display:"flex",flexDirection:"column",animation:"slideUp 0.3s ease"}}>
-
+      <div style={{position:"absolute",bottom:0,left:0,right:0,background:"linear-gradient(170deg,#0a1628,#111c2b)",borderTop:"1.5px solid rgba(255,255,255,0.1)",borderRadius:"28px 28px 0 0",padding:"18px 16px 36px",maxHeight:"80vh",display:"flex",flexDirection:"column",animation:"slideUp 0.3s ease"}}>
         {/* Header */}
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"16px 18px 12px",flexShrink:0,borderBottom:"1px solid rgba(255,255,255,0.07)"}}>
-          {(activeConv||compose)&&(
-            <button onClick={()=>{setActiveConv(null);setCompose(false);}} style={{background:"rgba(255,255,255,0.08)",border:"none",borderRadius:10,padding:"5px 12px",color:"rgba(255,255,255,0.5)",fontSize:12,cursor:"pointer",marginRight:8}}>←</button>
-          )}
-          <div style={{flex:1}}>
-            <div style={{color:"#fff",fontWeight:800,fontSize:15}}>
-              {compose?"Neue Nachricht":activeConv?`@${activeConv}`:"💬 Nachrichten"}
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14,flexShrink:0}}>
+          <div style={{display:"flex",alignItems:"center",gap:9}}>
+            <span style={{fontSize:20}}>✉️</span>
+            <div>
+              <div style={{color:"#fff",fontWeight:800,fontSize:15}}>Postfach</div>
+              <div style={{color:"rgba(255,255,255,0.35)",fontSize:11}}>{unread>0?`${unread} ungelesen`:"Alles gelesen"}</div>
             </div>
-            {!activeConv&&!compose&&<div style={{color:"rgba(255,255,255,0.35)",fontSize:11}}>{unread>0?`${unread} ungelesen`:"Alle gelesen"}</div>}
           </div>
           <div style={{display:"flex",gap:8}}>
-            {!compose&&!activeConv&&<button onClick={()=>setCompose(true)} style={{background:"linear-gradient(135deg,#4ade80,#22c55e)",border:"none",borderRadius:10,padding:"6px 14px",color:"#1a2e1a",fontWeight:700,fontSize:12,cursor:"pointer"}}>✏️</button>}
+            {!compose&&!mailView&&<button onClick={()=>setCompose(true)} style={{background:"linear-gradient(135deg,#4ade80,#22c55e)",border:"none",borderRadius:10,padding:"6px 14px",color:"#1a2e1a",fontWeight:700,fontSize:12,cursor:"pointer"}}>✏️ Schreiben</button>}
             <button onClick={onClose} style={{background:"rgba(255,255,255,0.08)",border:"none",borderRadius:10,width:30,height:30,color:"rgba(255,255,255,0.5)",fontSize:16,cursor:"pointer"}}>×</button>
           </div>
         </div>
-
-        {/* Compose */}
-        {compose&&(
-          <div style={{flex:1,overflowY:"auto",padding:"14px 16px"}}>
-            <div style={{display:"flex",flexDirection:"column",gap:9}}>
-              <div>
-                <div style={{color:"rgba(255,255,255,0.35)",fontSize:10,fontWeight:700,marginBottom:3}}>AN (Username)</div>
-                <input value={mailTo} onChange={e=>setMailTo(e.target.value)} placeholder="z.B. admin, verde..."
-                  style={{width:"100%",background:"rgba(255,255,255,0.07)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:11,padding:"9px 12px",color:"#fff",fontSize:13,outline:"none",fontFamily:"inherit"}}/>
+        <div style={{flex:1,overflowY:"auto"}}>
+          {/* Compose view */}
+          {compose&&(
+            <div>
+              <button onClick={()=>setCompose(false)} style={{background:"rgba(255,255,255,0.07)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:9,padding:"5px 12px",color:"rgba(255,255,255,0.4)",fontSize:12,cursor:"pointer",marginBottom:12}}>← Zurück</button>
+              <div style={{display:"flex",flexDirection:"column",gap:9}}>
+                <div>
+                  <div style={{color:"rgba(255,255,255,0.35)",fontSize:10,fontWeight:700,marginBottom:3}}>AN (Username)</div>
+                  <input value={mailTo} onChange={e=>setMailTo(e.target.value)} placeholder="z.B. admin, verde, ghost99..."
+                    style={{width:"100%",background:"rgba(255,255,255,0.07)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:11,padding:"9px 12px",color:"#fff",fontSize:13,outline:"none",fontFamily:"inherit"}}/>
+                </div>
+                <div>
+                  <div style={{color:"rgba(255,255,255,0.35)",fontSize:10,fontWeight:700,marginBottom:3}}>BETREFF</div>
+                  <input value={mailSubject} onChange={e=>setMailSubject(e.target.value)} placeholder="Betreff (optional)"
+                    style={{width:"100%",background:"rgba(255,255,255,0.07)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:11,padding:"9px 12px",color:"#fff",fontSize:13,outline:"none",fontFamily:"inherit"}}/>
+                </div>
+                <div>
+                  <div style={{color:"rgba(255,255,255,0.35)",fontSize:10,fontWeight:700,marginBottom:3}}>NACHRICHT</div>
+                  <textarea value={mailBody} onChange={e=>setMailBody(e.target.value)} placeholder="Deine Nachricht..." rows={5}
+                    style={{width:"100%",background:"rgba(255,255,255,0.07)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:11,padding:"9px 12px",color:"#fff",fontSize:13,outline:"none",fontFamily:"inherit",resize:"none",lineHeight:1.55}}/>
+                </div>
+                <div style={{background:"rgba(74,222,128,0.06)",border:"1px solid rgba(74,222,128,0.15)",borderRadius:10,padding:"7px 11px",color:"rgba(255,255,255,0.4)",fontSize:11}}>
+                  💡 Schreibe an <strong style={{color:"rgba(255,255,255,0.6)"}}>admin</strong> für Support-Anfragen
+                </div>
+                <button onClick={onSend} style={{background:"linear-gradient(135deg,#4ade80,#22c55e)",border:"none",borderRadius:13,padding:"12px",color:"#1a2e1a",fontWeight:800,fontSize:14,cursor:"pointer"}}>
+                  ✉️ Senden
+                </button>
               </div>
-              <div>
-                <div style={{color:"rgba(255,255,255,0.35)",fontSize:10,fontWeight:700,marginBottom:3}}>BETREFF</div>
-                <input value={mailSubject} onChange={e=>setMailSubject(e.target.value)} placeholder="Betreff (optional)"
-                  style={{width:"100%",background:"rgba(255,255,255,0.07)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:11,padding:"9px 12px",color:"#fff",fontSize:13,outline:"none",fontFamily:"inherit"}}/>
-              </div>
-              <div>
-                <div style={{color:"rgba(255,255,255,0.35)",fontSize:10,fontWeight:700,marginBottom:3}}>NACHRICHT</div>
-                <textarea value={mailBody} onChange={e=>setMailBody(e.target.value)} placeholder="Deine Nachricht..." rows={5}
-                  style={{width:"100%",background:"rgba(255,255,255,0.07)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:11,padding:"9px 12px",color:"#fff",fontSize:13,outline:"none",fontFamily:"inherit",resize:"none",lineHeight:1.55}}/>
-              </div>
-              <div style={{background:"rgba(74,222,128,0.06)",border:"1px solid rgba(74,222,128,0.15)",borderRadius:10,padding:"7px 11px",color:"rgba(255,255,255,0.4)",fontSize:11}}>
-                💡 Schreibe an <strong style={{color:"rgba(255,255,255,0.6)"}}>admin</strong> für Support
-              </div>
-              <button onClick={onSend} style={{background:"linear-gradient(135deg,#4ade80,#22c55e)",border:"none",borderRadius:13,padding:"12px",color:"#1a2e1a",fontWeight:800,fontSize:14,cursor:"pointer"}}>✉️ Senden</button>
             </div>
-          </div>
-        )}
-
-        {/* Conversation view - messenger style */}
-        {!compose&&activeConv&&conv&&(
-          <div style={{flex:1,display:"flex",flexDirection:"column",minHeight:0}}>
-            <div ref={scrollRef} style={{flex:1,overflowY:"auto",padding:"10px 14px",display:"flex",flexDirection:"column",gap:8}}>
-              {convMsgs.map((msg,i)=>{
-                const isMine=msg.from===username;
-                const showTime=i===0||new Date(msg.time)-new Date(convMsgs[i-1].time)>300000;
-                return(
-                  <React.Fragment key={msg.id}>
-                    {showTime&&<div style={{textAlign:"center",color:"rgba(255,255,255,0.2)",fontSize:10,margin:"4px 0"}}>{fmtFull(msg.time)}</div>}
-                    <div style={{display:"flex",flexDirection:"column",alignItems:isMine?"flex-end":"flex-start"}}>
-                      {msg.subject&&msg.subject!=="Keine Betreff"&&msg.subject!==`Re: ${msg.subject}`&&(
-                        <div style={{color:"rgba(255,255,255,0.25)",fontSize:9,marginBottom:3,paddingLeft:isMine?0:4}}>{msg.subject}</div>
-                      )}
-                      <div style={{maxWidth:"78%",background:isMine?"linear-gradient(135deg,#4ade80,#22c55e)":"rgba(255,255,255,0.09)",borderRadius:isMine?"16px 16px 4px 16px":"16px 16px 16px 4px",padding:"9px 13px"}}>
-                        <div style={{color:isMine?"#1a2e1a":"#fff",fontSize:13,lineHeight:1.5,whiteSpace:"pre-wrap"}}>{msg.body}</div>
-                      </div>
-                      <div style={{display:"flex",alignItems:"center",gap:5,marginTop:3}}>
-                        <span style={{color:"rgba(255,255,255,0.2)",fontSize:9}}>{fmtTime(msg.time)}</span>
-                        {isMine&&<span style={{color:"rgba(255,255,255,0.2)",fontSize:9}}>{msg.read?"✓✓":"✓"}</span>}
-                      </div>
-                    </div>
-                  </React.Fragment>
-                );
-              })}
-            </div>
-            {/* Reply box */}
-            <div style={{padding:"10px 14px 16px",borderTop:"1px solid rgba(255,255,255,0.07)",display:"flex",gap:8,alignItems:"flex-end",flexShrink:0}}>
-              <textarea value={mailBody} onChange={e=>setMailBody(e.target.value)} placeholder="Antwort..." rows={1}
-                onInput={e=>{e.target.style.height="auto";e.target.style.height=Math.min(100,e.target.scrollHeight)+"px";}}
-                style={{flex:1,background:"rgba(255,255,255,0.07)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:18,padding:"9px 14px",color:"#fff",fontSize:13,outline:"none",fontFamily:"inherit",resize:"none",lineHeight:1.4,maxHeight:100}}
-                onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();if(mailBody.trim()){setMailTo(activeConv);setMailSubject("");onSend();}}}}/>
-              <button onClick={()=>{if(mailBody.trim()){setMailTo(activeConv);setMailSubject("");onSend();}}} style={{background:"linear-gradient(135deg,#4ade80,#22c55e)",border:"none",borderRadius:"50%",width:38,height:38,color:"#1a2e1a",fontSize:18,cursor:"pointer",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>↑</button>
-            </div>
-          </div>
-        )}
-
-        {/* Conversation list */}
-        {!compose&&!activeConv&&(
-          <div style={{flex:1,overflowY:"auto",padding:"8px 14px"}}>
-            {conversations.length===0&&(
-              <div style={{textAlign:"center",padding:"30px 0",color:"rgba(255,255,255,0.2)"}}>
-                <div style={{fontSize:32,marginBottom:8}}>💬</div>
-                <div style={{fontSize:13}}>Noch keine Nachrichten</div>
-                <div style={{fontSize:11,marginTop:4,color:"rgba(255,255,255,0.13)"}}>Tippe auf ✏️ um zu schreiben</div>
-              </div>
-            )}
-            {conversations.map(conv=>{
-              const lastMsg=[...conv.messages].sort((a,b)=>new Date(b.time)-new Date(a.time))[0];
-              return(
-                <div key={conv.partner} onClick={()=>{setActiveConv(conv.partner);conv.messages.filter(m=>!m.read&&m.from!==username).forEach(m=>onRead(m));}}
-                  style={{display:"flex",gap:11,padding:"10px 0",borderBottom:"1px solid rgba(255,255,255,0.06)",cursor:"pointer",alignItems:"center"}}>
-                  <div style={{width:44,height:44,borderRadius:"50%",background:conv.unread>0?"rgba(74,222,128,0.15)":"rgba(255,255,255,0.06)",border:`1.5px solid ${conv.unread>0?"rgba(74,222,128,0.4)":"rgba(255,255,255,0.08)"}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0,fontWeight:700,color:conv.unread>0?"#4ade80":"rgba(255,255,255,0.5)"}}>
-                    {conv.partnerName?.[0]?.toUpperCase()||"?"}
-                  </div>
-                  <div style={{flex:1,minWidth:0}}>
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:3}}>
-                      <span style={{color:conv.unread>0?"#fff":"rgba(255,255,255,0.6)",fontWeight:conv.unread>0?700:400,fontSize:13}}>{conv.partnerName}</span>
-                      <span style={{color:"rgba(255,255,255,0.25)",fontSize:10}}>{fmtTime(conv.lastTime)}</span>
-                    </div>
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                      <div style={{color:"rgba(255,255,255,0.35)",fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{lastMsg?.from===username?"Du: ":""}{lastMsg?.body}</div>
-                      {conv.unread>0&&<div style={{background:"#4ade80",color:"#1a2e1a",borderRadius:"50%",width:18,height:18,fontSize:9,fontWeight:800,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,marginLeft:6}}>{conv.unread}</div>}
-                    </div>
+          )}
+          {/* Message view */}
+          {!compose&&mailView&&(
+            <div>
+              <button onClick={()=>setMailView(null)} style={{background:"rgba(255,255,255,0.07)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:9,padding:"5px 12px",color:"rgba(255,255,255,0.4)",fontSize:12,cursor:"pointer",marginBottom:12}}>← Zurück</button>
+              <div style={{background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.09)",borderRadius:16,padding:"14px"}}>
+                <div style={{marginBottom:12}}>
+                  <div style={{color:"#fff",fontWeight:700,fontSize:15,marginBottom:5}}>{mailView.subject}</div>
+                  <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                    <span style={{background:"rgba(74,222,128,0.1)",border:"1px solid rgba(74,222,128,0.2)",borderRadius:7,padding:"2px 8px",color:"#4ade80",fontSize:10}}>Von: {mailView.fromName||mailView.from}</span>
+                    <span style={{color:"rgba(255,255,255,0.25)",fontSize:10,padding:"2px 0"}}>{fmtT(mailView.time)}</span>
                   </div>
                 </div>
-              );
-            })}
-          </div>
-        )}
+                <div style={{color:"rgba(255,255,255,0.75)",fontSize:13,lineHeight:1.65,whiteSpace:"pre-wrap",borderTop:"1px solid rgba(255,255,255,0.07)",paddingTop:12}}>{mailView.body}</div>
+              </div>
+              <div style={{display:"flex",gap:8,marginTop:12}}>
+                <button onClick={()=>{setMailTo(mailView.from);setMailSubject(`Re: ${mailView.subject}`);setMailView(null);setCompose(true);}} style={{flex:1,background:"rgba(74,222,128,0.1)",border:"1px solid rgba(74,222,128,0.2)",borderRadius:11,padding:"9px",color:"#4ade80",fontWeight:700,fontSize:12,cursor:"pointer"}}>↩️ Antworten</button>
+                <button onClick={()=>onDelete(mailView.id)} style={{flex:1,background:"rgba(239,68,68,0.08)",border:"1px solid rgba(239,68,68,0.15)",borderRadius:11,padding:"9px",color:"rgba(239,68,68,0.7)",fontWeight:700,fontSize:12,cursor:"pointer"}}>🗑️ Löschen</button>
+              </div>
+            </div>
+          )}
+          {/* Inbox */}
+          {!compose&&!mailView&&(
+            <div>
+              {mailbox.length===0&&(
+                <div style={{textAlign:"center",padding:"30px 0",color:"rgba(255,255,255,0.2)"}}>
+                  <div style={{fontSize:32,marginBottom:8}}>📭</div>
+                  <div style={{fontSize:13}}>Postfach leer</div>
+                  <div style={{fontSize:11,marginTop:4,color:"rgba(255,255,255,0.13)"}}>Schreibe jemanden an oder warte auf Post</div>
+                </div>
+              )}
+              {mailbox.map(msg=>(
+                <div key={msg.id} onClick={()=>onRead(msg)} style={{background:msg.read?"rgba(255,255,255,0.03)":"rgba(74,222,128,0.06)",border:`1px solid ${msg.read?"rgba(255,255,255,0.07)":"rgba(74,222,128,0.2)"}`,borderRadius:13,padding:"10px 13px",marginBottom:8,cursor:"pointer",display:"flex",gap:10,alignItems:"flex-start"}}>
+                  <div style={{width:8,height:8,borderRadius:"50%",background:msg.read?"rgba(255,255,255,0.1)":"#4ade80",flexShrink:0,marginTop:4}}/>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
+                      <span style={{color:msg.read?"rgba(255,255,255,0.5)":"#fff",fontWeight:msg.read?400:700,fontSize:12,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{msg.subject}</span>
+                      <span style={{color:"rgba(255,255,255,0.2)",fontSize:9,flexShrink:0,marginLeft:6}}>{fmtT(msg.time)}</span>
+                    </div>
+                    <div style={{color:"rgba(255,255,255,0.4)",fontSize:11}}>von {msg.fromName||msg.from}</div>
+                    <div style={{color:"rgba(255,255,255,0.25)",fontSize:10,marginTop:2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{msg.body}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
