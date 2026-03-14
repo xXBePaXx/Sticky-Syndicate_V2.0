@@ -7,7 +7,7 @@ export default defineConfig({
   // Mit Custom Domain: base = '/'
   // Dein Repo heißt Sticky-Syndicate_V2.0 → base so lassen wenn du Custom Domain hast
   // Wenn KEIN custom domain: ändere auf '/Sticky-Syndicate_V2.0/'
-  base: '/Sticky-Syndicate_V2.0/',
+  base: '/',
   build: {
     outDir: 'dist',
     assetsInlineLimit: 2000000,
